@@ -1,15 +1,13 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import uproot
-from scipy.stats import chisquare
 import os
-import re
-import seaborn as sns
+# import seaborn as sns
 
 
-def build_hist(trees, features_names, baseline_tree, best_threshold_tree):
+def build_hist(trees, features_names, baseline_tree, best_threshold_tree, outliers_cut_off):
     len_feature = len(features_names)
-    fig, axes = plt.subplots(nrows=3 * len_feature, ncols=1, figsize=(10, len_feature * 20))
+    fig, axes = plt.subplots(nrows=4 * len_feature, ncols=1, figsize=(10, len_feature * 20))
 
     current_axis = 0
     for feature in features_names:
@@ -17,24 +15,35 @@ def build_hist(trees, features_names, baseline_tree, best_threshold_tree):
         #histogram wszystkich
         ax = axes[current_axis]
 
-        hist_params = np.array(baseline_tree[feature].array())
-        h1 = ax.hist(hist_params, bins=50, label="Baseline", alpha=0.7)
+        x_min, x_max = None, None
+        if feature in outliers_cut_off:
+            x_min, x_max = outliers_cut_off[feature]
 
-        hist_params = np.array(best_threshold_tree[feature].array())
-        h2 = ax.hist(hist_params, bins=50, label="Best threshold", alpha=0.7)
+        baseline_data = np.array(baseline_tree[feature].array())
+        optimal_threshold_data = np.array(best_threshold_tree[feature].array())
+
+        if x_min or x_max:
+            baseline_data = cut_outliers(baseline_data, x_min, x_max)
+            optimal_threshold_data = cut_outliers(optimal_threshold_data, x_min, x_max)
+
+        baseline_histogram = ax.hist(baseline_data, bins=50, label="Baseline", alpha=0.7)
+        optimal_threshold_histogram = ax.hist(optimal_threshold_data, bins=50, label="Best threshold", alpha=0.7)
 
         for path, tree in trees.items():
             threshold_value = int(path.split(".")[-2][-1]) / 10 + int(path.split(".")[-3][-1])
             hist_params = tree[feature].array()
             data = np.array(hist_params)
 
-            # ax.hist(data, bins=50, label=f"threshold = {threshold_value}", alpha=0.5)
-            # sns.kdeplot(data, label=f"threshold = {threshold_value}", ax=ax)
+            if x_min or x_max:
+                data = cut_outliers(data, x_min, x_max)
 
             y, binEdges = np.histogram(data, bins=50)
             bincenters = 0.5 * (binEdges[1:] + binEdges[:-1])
             ax.plot(bincenters, y, label=f"threshold = {threshold_value}")
 
+
+        if x_min or x_max:
+            ax.set_xlim(x_min, x_max)
 
         ax.set_xlabel("X-axis Label")
         ax.set_title(f"Linear histogram for {feature}", fontweight='bold')
@@ -43,36 +52,52 @@ def build_hist(trees, features_names, baseline_tree, best_threshold_tree):
 
         #histogram tylko dwa
         current_axis += 1
-
         ax = axes[current_axis]
 
-        hist_params = np.array(baseline_tree[feature].array())
-        ax.hist(hist_params, bins=50, label="Baseline", alpha=0.7)
-
-        hist_params = np.array(best_threshold_tree[feature].array())
-        ax.hist(hist_params, bins=50, label="Best threshold", alpha=0.7)
+        baseline_histogram = ax.hist(baseline_data, bins=50, label="Baseline", alpha=0.7)
+        optimal_threshold_histogram = ax.hist(optimal_threshold_data, bins=50, label="Best threshold", alpha=0.7)
 
         for path, tree in trees.items():
             threshold_value = int(path.split(".")[-2][-1]) / 10 + int(path.split(".")[-3][-1])
             hist_params = tree[feature].array()
             data = np.array(hist_params)
-            # ax.bar(x[:-1], y, width=np.diff(x), align="edge", label=f"threshold = {threshold_value}", alpha=0.5)
-            # ax.plot(x[:-1], y, label=f"threshold = {threshold_value}", alpha=1)
-            # ax.hist(data, bins=50, label=f"threshold = {threshold_value}", alpha=0.5)
+
+            if x_min or x_max:
+                data = cut_outliers(data, x_min, x_max)
 
             y, binEdges = np.histogram(data, bins=50)
             bincenters = 0.5 * (binEdges[1:] + binEdges[:-1])
             ax.plot(bincenters, y, label=f"threshold = {threshold_value}")
 
-
-
-
+        if x_min or x_max:
+            ax.set_xlim(x_min, x_max)
         ax.set_yscale("log")
-
         ax.set_xlabel("X-axis Label")
         ax.set_title(f"Logarithmic histogram for {feature}", fontweight='bold')
         ax.legend()
 
+        #ghosts factor
+        current_axis += 1
+        ax = axes[current_axis]
+        for path, tree in trees.items():
+            threshold_value = int(path.split(".")[-2][-1]) / 10 + int(path.split(".")[-3][-1])
+            hist_params = tree["isMatched"].array()
+            data = np.array(hist_params)
+            ratio = np.count_nonzero(data == 0) / data.shape[0] * 100
+            ax.scatter(threshold_value, ratio, c="black")
+
+        baseline_ghosts = np.array(baseline_tree["isMatched"].array())
+        baseline_ghost_ratio = np.count_nonzero(baseline_ghosts == 0) / baseline_ghosts.shape[0] * 100
+        optimal_threshold_ghosts = np.array(best_threshold_tree["isMatched"].array())
+        optimal_threshold_ghost_ratio = np.count_nonzero(optimal_threshold_ghosts == 0) / optimal_threshold_ghosts.shape[0] * 100
+
+        ax.scatter(0, baseline_ghost_ratio, label="baseline ghost ratio")
+        ax.scatter(0.45, optimal_threshold_ghost_ratio, label="optimal threshold ghost ratio")
+
+        ax.set_xlabel("threshold")
+        ax.set_ylabel("[%]")
+        ax.set_title(f"Ghosts", fontweight='bold')
+        ax.legend()
 
         #residuale
         current_axis += 1
@@ -90,12 +115,14 @@ def build_hist(trees, features_names, baseline_tree, best_threshold_tree):
 
         # calculate the difference
         # diff = baseline_hist - best_threshold_hist
+        # print((h1[0] - h2[0])/(h1[0] + 1e-10))
 
-        ax.bar(h2[1][:-1], h1[0] - h2[0], width= np.diff(h2[1]), align="edge", label="Baseline - Optimal Threshold", alpha=1)
-        # sns.barplot(x=bin_edges[:-1], y=diff, color='tab:blue', ec='k', width=1, alpha=0.8, ax=ax)
-        # ax.bar(bin_edges[:-1], h_diff, align="edge", label="Best threshold - baseline", alpha=0.5)
-        # # ax.plot(x_baseline[:-1], y_difference, label="Best threshold - baseline", alpha=0.5)
+        diff = 1 - optimal_threshold_histogram[0]/baseline_histogram[0]
+        # ax.bar(baseline_histogram[1][:-1], diff, width=np.diff(baseline_histogram[1]), align="edge", label="Baseline - Optimal Threshold", alpha=1)
+        ax.scatter(baseline_histogram[1][:-1], diff, label="Baseline - Optimal Threshold", alpha=1)
 
+        if x_min or x_max:
+            ax.set_xlim(x_min, x_max)
         ax.set_xlabel("X-axis Label")
         ax.set_title(f"Residual histogram for {feature}", fontweight='bold')
         ax.legend()
@@ -104,13 +131,15 @@ def build_hist(trees, features_names, baseline_tree, best_threshold_tree):
 
 
     # Dodaj legendę dla obu subwykresów
-    plt.suptitle("Moore Classifier Benchmarks", fontsize=20, fontweight='bold', y=0.96-len_feature/100)
+    plt.suptitle("Moore Classifier Benchmarks", fontsize=20, fontweight='bold', y=0.98-len_feature/100)
 
     # Zapisz wykres do pliku PDF
     plt.savefig("output_plot.pdf", format="pdf", bbox_inches="tight")
     print("Done!")
 
 
+def cut_outliers(arr, x_min, x_max):
+    return arr[(arr >= x_min) & (arr <= x_max)]
 
 
 
@@ -143,9 +172,10 @@ if __name__ == "__main__":
 ##################################################
 
 
-    features_to_analyse = ["p", "chi2", "Velo_lhcbID", "phi", "px", "py", "pt",  ]
-    #Momentum, Chi2PerDoF, nLHCbID, Phi, Position X, Position Y, Pt, Tx, Ty, Pseudo rapidity
-    build_hist(trees, features_to_analyse, baseline, trees["Dumper_recTracks_0.3.root"])
+    features_to_analyse = ["p", "nFTHits", "chi2", "ndof", "ovtx_x", "ovtx_y", "pt", "phi","eta"]
+    # p,nFTHits,chi2,ndof,ovtx_x,ovtx_y,pt,phi,eta, and isMatched for the ghost flag.
+    outliers_cut_off = {"p": [0, 200_000], "pt": [0, 7000], "eta": [1, 7]}
+    build_hist(trees, features_to_analyse, baseline, trees["Dumper_recTracks_0.3.root"], outliers_cut_off)
 
 
 
